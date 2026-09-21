@@ -1,14 +1,14 @@
 import json
 import os
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Dict, List, Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
+from openai.types.chat import ChatCompletionMessageParam
 from pydantic import BaseModel
 
 # Load environment variables
@@ -37,14 +37,17 @@ MEMORY_DIR.mkdir(exist_ok=True)
 # Load personality details
 def load_personality():
     with open("me.txt", "r", encoding="utf-8") as f:
-        return f.read().strip()
+        raw_data = f.read().strip()
+        return raw_data.replace(
+            "{{today}}", datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+        )
 
 
 PERSONALITY = load_personality()
 
 
 # Memory functions
-def load_conversation(session_id: str) -> List[Dict]:
+def load_conversation(session_id: str) -> list[ChatCompletionMessageParam]:
     """Load conversation history from file"""
     file_path = MEMORY_DIR / f"{session_id}.json"
     if file_path.exists():
@@ -53,7 +56,7 @@ def load_conversation(session_id: str) -> List[Dict]:
     return []
 
 
-def save_conversation(session_id: str, messages: List[Dict]):
+def save_conversation(session_id: str, messages: list[ChatCompletionMessageParam]):
     """Save conversation history to file"""
     file_path = MEMORY_DIR / f"{session_id}.json"
     with open(file_path, "w", encoding="utf-8") as f:
@@ -63,7 +66,7 @@ def save_conversation(session_id: str, messages: List[Dict]):
 # Request/Response models
 class ChatRequest(BaseModel):
     message: str
-    session_id: Optional[str] = None
+    session_id: str | None = None
 
 
 class ChatResponse(BaseModel):
@@ -91,11 +94,13 @@ async def chat(request: ChatRequest):
         conversation = load_conversation(session_id)
 
         # Build messages with history
-        messages = [{"role": "system", "content": PERSONALITY}]
+        messages: list[ChatCompletionMessageParam] = [
+            {"role": "system", "content": PERSONALITY}
+        ]
 
         # Add conversation history
         for msg in conversation:
-            messages.append(msg)
+            messages.append(msg.copy())
 
         # Add current message
         messages.append({"role": "user", "content": request.message})
@@ -105,7 +110,7 @@ async def chat(request: ChatRequest):
             model="gpt-4o-mini", messages=messages
         )
 
-        assistant_response = response.choices[0].message.content
+        assistant_response = response.choices[0].message.content or ""
 
         # Update conversation history
         conversation.append({"role": "user", "content": request.message})
