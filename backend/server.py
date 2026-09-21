@@ -3,14 +3,13 @@ import os
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TypedDict
 
 import boto3
 from botocore.exceptions import ClientError
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from openai import OpenAI
-from openai.types.chat import ChatCompletionMessageParam
 from pydantic import BaseModel
 
 # Load environment variables
@@ -28,8 +27,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize OpenAI client
-client = OpenAI()
+
+class ChatMessage(TypedDict):
+    role: str
+    content: str
+
+
+# Initialize Bedrock client - see Q42 on https://edwarddonner.com/faq if the Region gives you problems
+bedrock_client = boto3.client(
+    service_name="bedrock-runtime",
+    region_name=os.getenv("DEFAULT_AWS_REGION", "us-east-1"),
+)
+
+# Bedrock model selection - see Q42 on https://edwarddonner.com/faq for more
+BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "global.amazon.nova-2-micro-v1:0")
 
 # Memory storage configuration
 USE_S3 = os.getenv("USE_S3", "false").lower() == "true"
@@ -54,8 +65,36 @@ def load_personality():
 PERSONALITY = load_personality()
 
 
-# Memory functions
-def load_conversation(session_id: str) -> list[ChatCompletionMessageParam]:
+def call_bedrock(conversation: list[ChatMessage], user_message: str) -> str:
+    """Call AWS Bedrock with conversation history"""
+    messages = [
+        {"role": msg["role"], "content": [{"text": msg["content"]}]}
+        for msg in conversation
+    ]
+    messages.append({"role": "user", "content": [{"text": user_message}]})
+
+    try:
+        response = bedrock_client.converse(
+            modelId=BEDROCK_MODEL_ID,
+            messages=messages,
+            system=[{"text": PERSONALITY}],
+            inferenceConfig={"maxTokens": 2000, "temperature": 0.7, "topP": 0.9},
+        )
+        return response["output"]["message"]["content"][0]["text"]
+    except ClientError as e:
+        error_code = e.response["Error"]["Code"]
+        if error_code == "ValidationException":
+            raise HTTPException(
+                status_code=400, detail="Invalid message format for Bedrock"
+            ) from e
+        elif error_code == "AccessDeniedException":
+            raise HTTPException(
+                status_code=403, detail="Access denied to Bedrock model"
+            ) from e
+        raise HTTPException(status_code=500, detail=f"Bedrock error: {e}") from e
+
+
+def load_conversation(session_id: str) -> list[ChatMessage]:
     """Load conversation history from storage"""
     if USE_S3:
         try:
@@ -73,7 +112,7 @@ def load_conversation(session_id: str) -> list[ChatCompletionMessageParam]:
     return []
 
 
-def save_conversation(session_id: str, messages: list[ChatCompletionMessageParam]):
+def save_conversation(session_id: str, messages: list[ChatMessage]):
     """Save conversation history to storage"""
     if USE_S3:
         s3_client.put_object(
@@ -103,14 +142,15 @@ class ChatResponse(BaseModel):
 @app.get("/")
 async def root():
     return {
-        "message": "AI Digital Twin API with Memory",
+        "message": "AI Digital Twin API with Memory (Powered by AWS Bedrock)",
         "storage": "S3" if USE_S3 else "local",
+        "ai_model": BEDROCK_MODEL_ID,
     }
 
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "use_s3": USE_S3}
+    return {"status": "healthy", "use_s3": USE_S3, "bedrock_model": BEDROCK_MODEL_ID}
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -122,24 +162,8 @@ async def chat(request: ChatRequest):
         # Load conversation history
         conversation = load_conversation(session_id)
 
-        # Build messages with history
-        messages: list[ChatCompletionMessageParam] = [
-            {"role": "system", "content": PERSONALITY}
-        ]
-
-        # Add conversation history
-        for msg in conversation:
-            messages.append(msg.copy())
-
-        # Add current message
-        messages.append({"role": "user", "content": request.message})
-
-        # Call OpenAI API
-        response = client.chat.completions.create(
-            model="gpt-4o-mini", messages=messages
-        )
-
-        assistant_response = response.choices[0].message.content or ""
+        # Call Bedrock for response
+        assistant_response = call_bedrock(conversation, request.message)
 
         # Update conversation history
         conversation.append({"role": "user", "content": request.message})
@@ -150,8 +174,10 @@ async def chat(request: ChatRequest):
 
         return ChatResponse(response=assistant_response, session_id=session_id)
 
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.get("/sessions")

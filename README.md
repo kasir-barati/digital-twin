@@ -422,3 +422,12 @@ While waiting for CloudFront to deploy, update your Lambda to accept requests fr
 - Empty the AWS S3 buckets, then delete them.
 - Delete the Lambda function.
 - Disable the CloudFront distribution and then cancel the free flat-rate pricing plan, and now you should be able to delete it. Of course you will have to wait after disabling the CloudFront distribution before you can cancel the subscription plan and delete it.
+
+---
+
+## Bedrock
+
+1. You need to change the `backend/server.py` file to switch to Bedrock instead of OpenAI.
+2. You need to give the execution role you have for your Lambda function to have access to Bedrock.
+   - The way we do this without any API key is because we are already inside the AWS ecosystem.
+3. You can see you called Amazon's Bedrock in the CloudWatch logs.
