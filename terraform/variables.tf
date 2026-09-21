@@ -57,3 +57,9 @@ variable "root_domain" {
   type        = string
   default     = ""
 }
+
+variable "log_retention_days" {
+  description = "CloudWatch log retention in days for the Lambda function's log group"
+  type        = number
+  default     = 14
+}

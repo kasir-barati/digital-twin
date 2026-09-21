@@ -96,9 +96,25 @@ resource "aws_iam_role" "lambda_role" {
   })
 }
 
-resource "aws_iam_role_policy_attachment" "lambda_basic" {
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
-  role       = aws_iam_role.lambda_role.name
+# Scoped down from the AWSLambdaBasicExecutionRole managed policy:
+# No logs:CreateLogGroup, so Lambda can only write to the log group Terraform already owns (aws_cloudwatch_log_group.lambda) and can't silently create an unmanaged one that `terraform destroy` won't know about.
+resource "aws_iam_role_policy" "lambda_logs" {
+  name = "${local.name_prefix}-lambda-logs"
+  role = aws_iam_role.lambda_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogStream",
+          "logs:PutLogEvents",
+        ]
+        Resource = "${aws_cloudwatch_log_group.lambda.arn}:*"
+      },
+    ]
+  })
 }
 
 resource "aws_iam_role_policy_attachment" "lambda_bedrock" {
@@ -133,6 +149,18 @@ resource "aws_lambda_function" "api" {
 
   # Ensure Lambda waits for the distribution to exist
   depends_on = [aws_cloudfront_distribution.main]
+}
+
+# CloudWatch log group for the Lambda function.
+# https://kasir-barati.github.io/aws-flashcards/cloud-watch-log-groups.html
+resource "aws_cloudwatch_log_group" "lambda" {
+  name              = "/aws/lambda/${aws_lambda_function.api.function_name}"
+  retention_in_days = var.log_retention_days
+
+  # Uncomment once logs actually matter to keep around (e.g. prod, or once this env is used for anything beyond throwaway testing). It makes Terraform refuse to destroy this log group — including via `terraform destroy` — until the lifecycle block is removed again, so a teardown can't silently wipe log history. Until then, retention_in_days above already bounds cost/exposure, so leave it off for easy dev teardown.
+  # lifecycle {
+  #   prevent_destroy = true
+  # }
 }
 
 # API Gateway HTTP API
