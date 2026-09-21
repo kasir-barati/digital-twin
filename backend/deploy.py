@@ -44,6 +44,8 @@ def main():
             "--rm",
             "-v",
             f"{os.getcwd()}:/var/task",
+            "--user",
+            f"{os.getuid()}:{os.getgid()}",
             "--platform",
             "linux/amd64",  # Force x86_64 architecture
             "--entrypoint",
