@@ -453,7 +453,9 @@ Create `LambdaExecutionRoleProvisioner` and assign it to the user who will be ru
         "iam:UntagRole",
         "iam:ListRolePolicies",
         "iam:ListAttachedRolePolicies",
-        "iam:ListInstanceProfilesForRole"
+        "iam:ListInstanceProfilesForRole",
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy"
       ],
       "Resource": "arn:aws:iam::637423441352:role/*-lambda-role"
     },
