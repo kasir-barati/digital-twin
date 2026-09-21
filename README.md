@@ -414,3 +414,11 @@ While waiting for CloudFront to deploy, update your Lambda to accept requests fr
 3. Click **Create invalidation**
 4. Add path: `/*`
 5. Click **Create invalidation**
+
+---
+
+## Cleanup
+
+- Empty the AWS S3 buckets, then delete them.
+- Delete the Lambda function.
+- Disable the CloudFront distribution and then cancel the free flat-rate pricing plan, and now you should be able to delete it. Of course you will have to wait after disabling the CloudFront distribution before you can cancel the subscription plan and delete it.
