@@ -431,3 +431,119 @@ While waiting for CloudFront to deploy, update your Lambda to accept requests fr
 2. You need to give the execution role you have for your Lambda function to have access to Bedrock.
    - The way we do this without any API key is because we are already inside the AWS ecosystem.
 3. You can see you called Amazon's Bedrock in the CloudWatch logs.
+
+---
+
+## Terraform
+
+Create `LambdaExecutionRoleProvisioner` and assign it to the user who will be running the terraform:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "LambdaRoleLifecycle",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:DeleteRole",
+        "iam:GetRole",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:ListRolePolicies",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListInstanceProfilesForRole"
+      ],
+      "Resource": "arn:aws:iam::637423441352:role/*-lambda-role"
+    },
+    {
+      "Sid": "LambdaRolePassToLambdaOnly",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::637423441352:role/*-lambda-role",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "lambda.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "LambdaRoleAttachKnownPoliciesOnly",
+      "Effect": "Allow",
+      "Action": ["iam:AttachRolePolicy", "iam:DetachRolePolicy"],
+      "Resource": "arn:aws:iam::637423441352:role/*-lambda-role",
+      "Condition": {
+        "ArnEquals": {
+          "iam:PolicyARN": [
+            "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+            "arn:aws:iam::aws:policy/AmazonBedrockFullAccess",
+            "arn:aws:iam::aws:policy/AmazonS3FullAccess"
+          ]
+        }
+      }
+    }
+  ]
+}
+```
+
+Create `AIEngineerUserManagement` amd assign it to the user too:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ManageOwnUserTagsAndCredentials",
+      "Effect": "Allow",
+      "Action": [
+        "iam:TagUser",
+        "iam:ListUserTags",
+        "iam:UntagUser",
+        "iam:ListMFADevices",
+        "iam:ListSigningCertificates",
+        "iam:GetLoginProfile"
+      ],
+      "Resource": "arn:aws:iam::637423441352:user/aiengineer"
+    }
+  ]
+}
+```
+
+And `AIEngineerAccessKeySelfService` with:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ManageOwnAccessKeys",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateAccessKey",
+        "iam:UpdateAccessKey",
+        "iam:DeleteAccessKey",
+        "iam:ListAccessKeys",
+        "iam:GetAccessKeyLastUsed"
+      ],
+      "Resource": "arn:aws:iam::637423441352:user/aiengineer"
+    }
+  ]
+}
+```
+
+On top of that I had granted the user these permissions:
+
+- `AmazonBedrockFullAccess`.
+- `AmazonAPIGatewayAdministrator`.
+- `CloudFrontFullAccess`.
+- `AmazonS3FullAccess`.
+- `AmazonEC2ContainerRegistryFullAccess`.
+- `AWSAppRunnerFullAccess`.
+- `AWSLambda_FullAccess`.
+- `CloudWatchFullAccess`.
+- `CloudWatchFullAccessV2`.
+- `CloudWatchLogsFullAccess`.
+- `IAMUserChangePassword`.
+
+`AmazonBedrockFullAccess` and `AmazonS3FullAccess` are both AWS managed "FullAccess" policies — much broader than a Lambda function typically needs. They must be limited to what Lambda function needs.
