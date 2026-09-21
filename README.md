@@ -549,3 +549,9 @@ On top of that I had granted the user these permissions:
 - `IAMUserChangePassword`.
 
 `AmazonBedrockFullAccess` and `AmazonS3FullAccess` are both AWS managed "FullAccess" policies — much broader than a Lambda function typically needs. They must be limited to what Lambda function needs.
+
+Potential improvements:
+
+1. Store Terraform state file in a AWS S3.
+2. `aws_iam_role_policy_attachment.lambda_s3` uses `AmazonS3FullAccess` (access to every bucket in the account) and `lambda_bedrock` similarly uses `AmazonBedrockFullAccess`. Both are broader than the Lambda needs — it only touches `aws_s3_bucket.memory` and one Bedrock model (`var.bedrock_model_id`).
+3. CloudFront → S3 origin uses `origin_protocol_policy = "http-only"`, so traffic between CloudFront and the S3 website endpoint is unencrypted. Also related: the frontend bucket is fully public (`block_public_*` all false) rather than using Origin Access Control.
