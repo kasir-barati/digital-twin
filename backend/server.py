@@ -36,7 +36,7 @@ MEMORY_DIR.mkdir(exist_ok=True)
 
 # Load personality details
 def load_personality():
-    with open("me.txt", "r", encoding="utf-8") as f:
+    with open("system-prompt.txt", "r", encoding="utf-8") as f:
         raw_data = f.read().strip()
         return raw_data.replace(
             "{{today}}", datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
