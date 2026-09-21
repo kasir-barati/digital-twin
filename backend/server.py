@@ -4,6 +4,8 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
+import boto3
+from botocore.exceptions import ClientError
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,9 +31,15 @@ app.add_middleware(
 # Initialize OpenAI client
 client = OpenAI()
 
-# Memory directory
+# Memory storage configuration
+USE_S3 = os.getenv("USE_S3", "false").lower() == "true"
+S3_BUCKET = os.getenv("S3_BUCKET", "")
 MEMORY_DIR = Path("../memory")
-MEMORY_DIR.mkdir(exist_ok=True)
+
+if USE_S3:
+    s3_client = boto3.client("s3")
+else:
+    MEMORY_DIR.mkdir(exist_ok=True)
 
 
 # Load personality details
@@ -48,7 +56,16 @@ PERSONALITY = load_personality()
 
 # Memory functions
 def load_conversation(session_id: str) -> list[ChatCompletionMessageParam]:
-    """Load conversation history from file"""
+    """Load conversation history from storage"""
+    if USE_S3:
+        try:
+            response = s3_client.get_object(Bucket=S3_BUCKET, Key=f"{session_id}.json")
+            return json.loads(response["Body"].read().decode("utf-8"))
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "NoSuchKey":
+                return []
+            raise
+
     file_path = MEMORY_DIR / f"{session_id}.json"
     if file_path.exists():
         with open(file_path, "r", encoding="utf-8") as f:
@@ -57,7 +74,16 @@ def load_conversation(session_id: str) -> list[ChatCompletionMessageParam]:
 
 
 def save_conversation(session_id: str, messages: list[ChatCompletionMessageParam]):
-    """Save conversation history to file"""
+    """Save conversation history to storage"""
+    if USE_S3:
+        s3_client.put_object(
+            Bucket=S3_BUCKET,
+            Key=f"{session_id}.json",
+            Body=json.dumps(messages, indent=2, ensure_ascii=False),
+            ContentType="application/json",
+        )
+        return
+
     file_path = MEMORY_DIR / f"{session_id}.json"
     with open(file_path, "w", encoding="utf-8") as f:
         json.dump(messages, f, indent=2, ensure_ascii=False)
@@ -76,12 +102,15 @@ class ChatResponse(BaseModel):
 
 @app.get("/")
 async def root():
-    return {"message": "AI Digital Twin API with Memory"}
+    return {
+        "message": "AI Digital Twin API with Memory",
+        "storage": "S3" if USE_S3 else "local",
+    }
 
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy"}
+    return {"status": "healthy", "use_s3": USE_S3}
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -129,6 +158,23 @@ async def chat(request: ChatRequest):
 async def list_sessions():
     """List all conversation sessions"""
     sessions = []
+
+    if USE_S3:
+        response = s3_client.list_objects_v2(Bucket=S3_BUCKET)
+        for obj in response.get("Contents", []):
+            session_id = Path(obj["Key"]).stem
+            conversation = load_conversation(session_id)
+            sessions.append(
+                {
+                    "session_id": session_id,
+                    "message_count": len(conversation),
+                    "last_message": conversation[-1]["content"]
+                    if conversation
+                    else None,
+                }
+            )
+        return {"sessions": sessions}
+
     for file_path in MEMORY_DIR.glob("*.json"):
         session_id = file_path.stem
         with open(file_path, "r", encoding="utf-8") as f:
