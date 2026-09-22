@@ -555,3 +555,16 @@ Potential improvements:
 1. Store Terraform state file in a AWS S3.
 2. `aws_iam_role_policy_attachment.lambda_s3` uses `AmazonS3FullAccess` (access to every bucket in the account) and `lambda_bedrock` similarly uses `AmazonBedrockFullAccess`. Both are broader than the Lambda needs — it only touches `aws_s3_bucket.memory` and one Bedrock model (`var.bedrock_model_id`).
 3. CloudFront → S3 origin uses `origin_protocol_policy = "http-only"`, so traffic between CloudFront and the S3 website endpoint is unencrypted. Also related: the frontend bucket is fully public (`block_public_*` all false) rather than using Origin Access Control.
+
+### Terraform State in AWS S3
+
+For this we have the terraform-state directory which will provision the AWS S3 bucket we need for storing the Terraform state file and since it is a single resource it does matter what will happen to its state file. We can delete manually later if it comes to it.
+
+First go to your AWS Console and create an access key for the IAM user you have access to, and it must be allowed to create AWS S3 bucket. E.g. here I have already an IAM user with necessary permissions to create such resource. In fact I am using the same IAM user which terraform will use to provision the digital twin.
+
+```bash
+aws configure --profile twin-dev
+cd terraform-state
+terraform init
+terraform apply
+```
