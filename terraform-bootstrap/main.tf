@@ -266,6 +266,30 @@ resource "aws_iam_role_policy" "github_additional" {
         }
       },
       {
+        # For ../terraform's aws_cloudwatch_log_group.lambda none of the managed policies above grant log group management.
+        Sid    = "ManageLambdaLogGroups"
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogGroup",
+          "logs:DeleteLogGroup",
+          "logs:PutRetentionPolicy",
+          "logs:DeleteRetentionPolicy",
+          "logs:TagResource",
+          "logs:UntagResource",
+          "logs:TagLogGroup",
+          "logs:UntagLogGroup",
+          "logs:ListTagsForResource",
+          "logs:ListTagsLogGroup",
+        ]
+        Resource = "arn:aws:logs:*:${data.aws_caller_identity.current.account_id}:log-group:/aws/lambda/*"
+      },
+      {
+        Sid      = "DescribeLogGroups"
+        Effect   = "Allow"
+        Action   = "logs:DescribeLogGroups"
+        Resource = "*"
+      },
+      {
         Sid      = "CallerIdentity"
         Effect   = "Allow"
         Action   = "sts:GetCallerIdentity"

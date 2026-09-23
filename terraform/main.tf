@@ -96,6 +96,9 @@ resource "aws_iam_role" "lambda_role" {
   })
 
   # Required so ../terraform-bootstrap's github-actions-twin-deploy role is permitted to manage (create/update/pass) this role at all, its IAM permissions are scoped to roles carrying IamManagedByRole tag, checked via aws:ResourceTag/aws:RequestTag conditions in terraform-bootstrap/main.tf. This value must match aws_iam_role.github_actions's name there.
+  # Also required by that CI role: its iam:CreateRole allow has an iam:PermissionsBoundary condition, so creating a role without exactly this boundary is denied. The policy itself is created by ../terraform-bootstrap (aws_iam_policy.ci_managed_role_boundary).
+  permissions_boundary = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:policy/ci-managed-role-boundary"
+
   tags = {
     IamManagedByRole = "github-actions-twin-deploy"
   }
