@@ -18,8 +18,19 @@ echo "🗑️ Preparing to destroy ${PROJECT_NAME}-${ENVIRONMENT} infrastructure
 # Navigate to terraform directory
 cd "$(dirname "$0")/../terraform"
 
+# Initialize the S3 backend (required on fresh checkouts, e.g. CI runners)
+terraform init -input=false
+
+# main.tf hashes the Lambda zip, which is only produced by a build; destroy
+# doesn't need the real artifact, so provide a placeholder if it's missing
+LAMBDA_ZIP="../backend/lambda-deployment.zip"
+if [ ! -f "$LAMBDA_ZIP" ]; then
+    echo "  Creating placeholder Lambda package for destroy..."
+    python3 -c "import zipfile; zipfile.ZipFile('$LAMBDA_ZIP', 'w').writestr('placeholder.txt', '')"
+fi
+
 # Check if workspace exists
-if ! terraform workspace list | grep -q "$ENVIRONMENT"; then
+if ! terraform workspace list | grep -qw "$ENVIRONMENT"; then
     echo "❌ Error: Workspace '$ENVIRONMENT' does not exist"
     echo "Available workspaces:"
     terraform workspace list
