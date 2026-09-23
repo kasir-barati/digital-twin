@@ -60,7 +60,7 @@ resource "aws_iam_role" "github_actions" {
           StringEquals = {
             "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
             "token.actions.githubusercontent.com:sub" = [
-              for env in ["dev", "test", "prod"] : "repo:${var.github_repository}:environment:${env}"
+              for env in ["dev", "test", "prod"] : "${var.github_oidc_sub_prefix}:environment:${env}"
             ]
           }
         }

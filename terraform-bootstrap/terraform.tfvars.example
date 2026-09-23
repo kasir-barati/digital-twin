@@ -4,4 +4,6 @@ environment  = "dev"
 # Required: name of the AWS CLI profile to provision with (see ~/.aws/config). Set explicitly so Terraform never silently falls back to the default profile or credentials in ~/.aws, which could provision resources in the wrong account.
 aws_profile = "twin-dev"
 
+# Get it with: gh api repos/<owner>/<repo>/actions/oidc/customization/sub --jq .sub_claim_prefix
+github_oidc_sub_prefix = "repo:kasir-barati@73785723/digital-twin@1380639957"
 github_repository="kasir-barati/digital-twin"

@@ -38,3 +38,13 @@ variable "github_repository" {
   description = "GitHub repository in format 'owner/repo'"
   type        = string
 }
+
+variable "github_oidc_sub_prefix" {
+  description = "Prefix of the OIDC token's sub claim. With GitHub's immutable subject enabled it carries owner/repo IDs, e.g. 'repo:owner@123/repo@456'. Get it with: gh api repos/<owner>/<repo>/actions/oidc/customization/sub --jq .sub_claim_prefix"
+  type        = string
+
+  validation {
+    condition     = startswith(var.github_oidc_sub_prefix, "repo:")
+    error_message = "github_oidc_sub_prefix must start with 'repo:'."
+  }
+}
