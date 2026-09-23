@@ -59,8 +59,9 @@ resource "aws_iam_role" "github_actions" {
         Condition = {
           StringEquals = {
             "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
-            # Only workflow runs triggered on main can assume this role — PR/branch workflows cannot.
-            "token.actions.githubusercontent.com:sub" = "repo:${var.github_repository}:ref:refs/heads/main"
+            "token.actions.githubusercontent.com:sub" = [
+              for env in ["dev", "test", "prod"] : "repo:${var.github_repository}:environment:${env}"
+            ]
           }
         }
       }
@@ -221,7 +222,7 @@ resource "aws_iam_role_policy" "github_additional" {
         Condition = {
           StringEquals = {
             "aws:RequestTag/${local.ci_managed_tag_key}" = local.ci_managed_tag_value
-            "iam:PermissionsBoundary"                     = aws_iam_policy.ci_managed_role_boundary.arn
+            "iam:PermissionsBoundary"                    = aws_iam_policy.ci_managed_role_boundary.arn
           }
         }
       },
