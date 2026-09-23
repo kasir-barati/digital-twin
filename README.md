@@ -558,13 +558,13 @@ Potential improvements:
 
 ### Terraform State in AWS S3
 
-For this we have the terraform-state directory which will provision the AWS S3 bucket we need for storing the Terraform state file and since it is a single resource it does matter what will happen to its state file. We can delete manually later if it comes to it.
+For this we have the `terraform-bootstrap` directory, which provisions everything that must exist *before* GitHub Actions can run Terraform at all: the S3 state bucket, the GitHub OIDC provider, and the IAM role GitHub Actions assumes. This is a chicken-and-egg problem — CI can't create the resources it needs to run — so this directory is applied only by a human, locally, never by CI. See `terraform-bootstrap/README.md` for details.
 
 First go to your AWS Console and create an access key for the IAM user you have access to, and it must be allowed to create AWS S3 bucket. E.g. here I have already an IAM user with necessary permissions to create such resource. In fact I am using the same IAM user which terraform will use to provision the digital twin.
 
 ```bash
 aws configure --profile twin-dev
-cd terraform-state
+cd terraform-bootstrap
 terraform init
 terraform apply
 ```

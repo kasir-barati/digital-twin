@@ -3,3 +3,5 @@ environment  = "dev"
 
 # Required: name of the AWS CLI profile to provision with (see ~/.aws/config). Set explicitly so Terraform never silently falls back to the default profile or credentials in ~/.aws, which could provision resources in the wrong account.
 aws_profile = "twin-dev"
+
+github_repository="kasir-barati/digital-twin"

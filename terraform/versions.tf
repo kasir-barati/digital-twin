@@ -1,11 +1,19 @@
 terraform {
-  required_version = ">= 1.0"
+  required_version = ">= 1.10.0"
 
   required_providers {
     aws = {
       source  = "hashicorp/aws"
       version = "~> 6.0"
     }
+  }
+
+  backend "s3" {
+    bucket       = "twin-terraform-state-637423441352"
+    key          = "twin/terraform.tfstate"
+    region       = "eu-central-1" # We cannot use variables/locals/data here: https://developer.hashicorp.com/terraform/language/backend#define-a-backend-block
+    use_lockfile = true
+    encrypt      = true
   }
 }
 

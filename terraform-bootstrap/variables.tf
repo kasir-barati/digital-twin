@@ -33,3 +33,8 @@ variable "aws_profile" {
     error_message = "aws_profile must be set to an explicit AWS CLI profile name (see ~/.aws/config). This prevents accidentally provisioning against the wrong AWS account."
   }
 }
+
+variable "github_repository" {
+  description = "GitHub repository in format 'owner/repo'"
+  type        = string
+}
