@@ -48,3 +48,8 @@ variable "github_oidc_sub_prefix" {
     error_message = "github_oidc_sub_prefix must start with 'repo:'."
   }
 }
+
+variable "force_destroy_state_bucket" {
+  description = "Let `terraform destroy` delete the state bucket even if it still holds objects/versions. It is read from state, so it must be applied before destroy takes effect (see README)."
+  type        = bool
+}

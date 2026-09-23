@@ -1,5 +1,6 @@
 resource "aws_s3_bucket" "terraform_state" {
-  bucket = "twin-terraform-state-${data.aws_caller_identity.current.account_id}"
+  bucket        = "twin-terraform-state-${data.aws_caller_identity.current.account_id}"
+  force_destroy = var.force_destroy_state_bucket
 }
 
 resource "aws_s3_bucket_versioning" "terraform_state" {
