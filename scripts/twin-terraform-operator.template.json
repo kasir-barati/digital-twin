@@ -1,0 +1,170 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CallerIdentity",
+      "Effect": "Allow",
+      "Action": "sts:GetCallerIdentity",
+      "Resource": "*"
+    },
+    {
+      "Sid": "SelfServiceOwnUser",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetUser",
+        "iam:TagUser",
+        "iam:UntagUser",
+        "iam:ListUserTags",
+        "iam:GetLoginProfile",
+        "iam:ListMFADevices",
+        "iam:ListSigningCertificates",
+        "iam:ListAttachedUserPolicies",
+        "iam:ListUserPolicies",
+        "iam:ListGroupsForUser",
+        "iam:CreateAccessKey",
+        "iam:UpdateAccessKey",
+        "iam:DeleteAccessKey",
+        "iam:ListAccessKeys",
+        "iam:GetAccessKeyLastUsed"
+      ],
+      "Resource": "arn:aws:iam::<AWS_ACCOUNT_ID>:user/${aws:username}"
+    },
+    {
+      "Sid": "LambdaRoleManage",
+      "Effect": "Allow",
+      "Action": [
+        "iam:GetRole",
+        "iam:DeleteRole",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:ListRolePolicies",
+        "iam:GetRolePolicy",
+        "iam:DeleteRolePolicy",
+        "iam:ListAttachedRolePolicies",
+        "iam:DetachRolePolicy",
+        "iam:ListInstanceProfilesForRole"
+      ],
+      "Resource": "arn:aws:iam::<AWS_ACCOUNT_ID>:role/*-lambda-role"
+    },
+    {
+      "Sid": "LambdaRoleWriteOnlyWithBoundary",
+      "Effect": "Allow",
+      "Action": ["iam:CreateRole", "iam:PutRolePolicy"],
+      "Resource": "arn:aws:iam::<AWS_ACCOUNT_ID>:role/*-lambda-role",
+      "Condition": {
+        "StringEquals": {
+          "iam:PermissionsBoundary": "arn:aws:iam::<AWS_ACCOUNT_ID>:policy/ci-managed-role-boundary"
+        }
+      }
+    },
+    {
+      "Sid": "LambdaRoleAttachKnownPoliciesOnly",
+      "Effect": "Allow",
+      "Action": "iam:AttachRolePolicy",
+      "Resource": "arn:aws:iam::<AWS_ACCOUNT_ID>:role/*-lambda-role",
+      "Condition": {
+        "ArnEquals": {
+          "iam:PolicyARN": [
+            "arn:aws:iam::aws:policy/AmazonBedrockFullAccess",
+            "arn:aws:iam::aws:policy/AmazonS3FullAccess"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "LambdaRolePassToLambdaOnly",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::<AWS_ACCOUNT_ID>:role/*-lambda-role",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "lambda.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "BootstrapListOidcProviders",
+      "Effect": "Allow",
+      "Action": "iam:ListOpenIDConnectProviders",
+      "Resource": "*"
+    },
+    {
+      "Sid": "BootstrapGithubOidcProvider",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateOpenIDConnectProvider",
+        "iam:DeleteOpenIDConnectProvider",
+        "iam:GetOpenIDConnectProvider",
+        "iam:TagOpenIDConnectProvider",
+        "iam:UntagOpenIDConnectProvider",
+        "iam:UpdateOpenIDConnectProviderThumbprint"
+      ],
+      "Resource": "arn:aws:iam::<AWS_ACCOUNT_ID>:oidc-provider/token.actions.githubusercontent.com"
+    },
+    {
+      "Sid": "BootstrapGithubActionsRole",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:DeleteRole",
+        "iam:GetRole",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:PutRolePolicy",
+        "iam:GetRolePolicy",
+        "iam:DeleteRolePolicy",
+        "iam:ListRolePolicies",
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListInstanceProfilesForRole"
+      ],
+      "Resource": "arn:aws:iam::<AWS_ACCOUNT_ID>:role/github-actions-twin-deploy"
+    },
+    {
+      "Sid": "BootstrapBoundaryPolicy",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreatePolicy",
+        "iam:DeletePolicy",
+        "iam:GetPolicy",
+        "iam:GetPolicyVersion",
+        "iam:ListPolicyVersions",
+        "iam:CreatePolicyVersion",
+        "iam:DeletePolicyVersion",
+        "iam:TagPolicy",
+        "iam:UntagPolicy"
+      ],
+      "Resource": "arn:aws:iam::<AWS_ACCOUNT_ID>:policy/ci-managed-role-boundary"
+    },
+    {
+      "Sid": "CustomDomainAcm",
+      "Effect": "Allow",
+      "Action": [
+        "acm:RequestCertificate",
+        "acm:DescribeCertificate",
+        "acm:DeleteCertificate",
+        "acm:ListCertificates",
+        "acm:ListTagsForCertificate",
+        "acm:AddTagsToCertificate",
+        "acm:RemoveTagsFromCertificate"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "CustomDomainRoute53",
+      "Effect": "Allow",
+      "Action": [
+        "route53:ListHostedZones",
+        "route53:ListHostedZonesByName",
+        "route53:GetHostedZone",
+        "route53:ListTagsForResource",
+        "route53:ListResourceRecordSets",
+        "route53:ChangeResourceRecordSets",
+        "route53:GetChange"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

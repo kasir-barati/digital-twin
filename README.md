@@ -1,570 +1,235 @@
-# How to Deploy
+# Digital Twin
 
-The architecture at a glance:
+An AI "digital twin" you can chat with. A static Next.js frontend talks to a FastAPI backend running on AWS Lambda. The backend answers with an Amazon Bedrock model and keeps each conversation as a JSON file in S3.
+
+**Terraform provisions all of the AWS infrastructure.** I use the AWS Console for one thing only: the one-time IAM setup for the `aiengineer` user in [step 1](#1-one-time-iam-setup-for-aiengineer). After that, I manage everything with `terraform` (`scripts/` is a convenient wrapper which does some other things before calling `terraform`).
+
+## Architecture
+
+```mermaid
+flowchart TD
+    User["User browser"] -->|HTTPS - load page| CF["CloudFront distribution"]
+    CF -->|"HTTP (S3 website endpoint)"| FE["S3 frontend bucket - static Next.js export"]
+    User -->|"HTTPS - API calls"| APIGW["API Gateway HTTP API"]
+    APIGW -->|"AWS_PROXY integration"| Lambda["Lambda twin-ENV-api (FastAPI + Mangum)"]
+    Lambda -->|"Converse API"| Bedrock["Amazon Bedrock model"]
+    Lambda -->|"read/write conversation JSON"| Mem["S3 memory bucket"]
+    Lambda -->|logs| CW["CloudWatch log group"]
+
+    subgraph Optional["Optional custom domain - prod only"]
+        R53["Route 53 alias records"] --> CF
+        ACM["ACM certificate in us-east-1"] --> CF
+    end
+```
+
+The browser does two separate trips:
+
+1. Page load: browser → (Route 53) → CloudFront → S3 static bucket → Next.js bundle renders in the browser.
+2. API calls: browser (the JS code running in the browser) → (Route 53) → API Gateway → Lambda → Bedrock / memory bucket / CloudWatch.
+
+| Component            | Terraform resource(s)                                   | Purpose                                                                 |
+| -------------------- | ------------------------------------------------------- | ----------------------------------------------------------------------- |
+| CloudFront           | `aws_cloudfront_distribution.main`                      | Global CDN and HTTPS in front of the frontend bucket                    |
+| S3 frontend bucket   | `aws_s3_bucket.frontend` + website config + policy      | Hosts the static Next.js export (`frontend/out`)                        |
+| API Gateway          | `aws_apigatewayv2_api.main` + routes + `$default` stage | `GET /`, `GET /health`, `POST /chat`, CORS, throttling                  |
+| Lambda               | `aws_lambda_function.api`                               | Runs `backend/lambda_handler.handler` (Python 3.12, x86_64)             |
+| Lambda IAM role      | `aws_iam_role.lambda_role`                              | Execution role with the `ci-managed-role-boundary` permissions boundary |
+| S3 memory bucket     | `aws_s3_bucket.memory`                                  | Private bucket that stores conversation history as JSON                 |
+| CloudWatch log group | `aws_cloudwatch_log_group.lambda`                       | Lambda logs with a set retention period (default 14 days)               |
+| ACM and Route 53     | `aws_acm_certificate.site`, `aws_route53_record.*`      | Only when `use_custom_domain = true`                                    |
+
+### How Terraform is organized
+
+The repo has **two Terraform stacks**. They are separate because of a chicken-and-egg problem: CI can't create the state bucket or the IAM role that it needs before it can run Terraform at all.
+
+```mermaid
+flowchart TB
+    subgraph Once["Step 1 is executed once manually (I used aiengineer's access keys)"]
+        Admin["aiengineer"] --> Boot["Runs 'terraform apply' in terraform-bootstrap"]
+        Boot --> |"Creates"| State["S3 state bucket"]
+        Boot --> |"Creates"| OIDC["GitHub OIDC provider"]
+        Boot --> |"Creates"| GHRole["IAM role github-actions-twin-deploy"]
+        Boot --> |"Creates"| Boundary["Permissions boundary policy"]
+    end
+
+    subgraph Every["Step 2 is all about GitHub Actions"]
+        Trigger["Push to main or manual run"] --> GHA["GitHub Actions workflow"]
+        GHA --> AssumeRole["OIDC Role, no stored AWS keys"]
+        GHRole <--> |"Assumes"| AssumeRole
+        AssumeRole --> Main["GH runs terraform apply in terraform"]
+        Main -->|"Remote state and lock"| State
+        Main -->|"Lambda role must carry"| Boundary
+    end
+```
+
+[Step 1](#1-one-time-iam-setup-for-aiengineer) is the only part that has to run on your machine. After that, deploys happen in GitHub Actions: the workflow gets short-lived AWS credentials by assuming the role that bootstrap created, then applies the app stack. You can still run [`scripts/deploy.sh`](./scripts/deploy.sh) locally for the app stack if you want, but you don't need to.
+
+| Directory             | Applied by       | State                                            |
+| --------------------- | ---------------- | ------------------------------------------------ |
+| `terraform-bootstrap` | Executed locally | Local (can be moved to the cloud later manually) |
+| `terraform`           | CI/CD pipeline   | S3 backend, one state per env                    |
+
+Environments (`dev`, `test`, `prod`) are Terraform workspaces in the app stack. Resource names are prefixed with `<project_name>-<environment>` (for example `twin-dev-api`), and bucket names end with the account ID.
+
+## Repository layout
 
 ```text
-User Browser
-    ↓ HTTPS
-CloudFront (CDN)
-    ↓
-S3 Static Website (Frontend)
-    ↓ HTTPS API Calls
-API Gateway
-    ↓
-Lambda Function (Backend)
-    ↓
-    ├── OpenAI API (for responses)
-    └── S3 Memory Bucket (for persistence)
+digital-twin/
+├── backend/                  # FastAPI app, system prompt
+├── frontend/                 # Next.js app
+│   └── out/                  # Static export output
+├── terraform/                # App stack: everything the twin runs on
+├── terraform-bootstrap/      # One-time stack: state bucket, GitHub OIDC, CI role, permissions boundary
+├── scripts/
+│   ├── deploy.sh             # Build Lambda zip → terraform apply → build frontend → sync to S3
+│   └── destroy.sh            # Empty buckets, then terraform destroy
+└── .github/
+    └── workflows/
+        ├── deploy.yml
+        └── destroy.yml
 ```
 
-Key components are:
+> [!TIP]
+>
+> [`backend/deploy.py`](./backend/deploy.py) shows the usual way to package a Python Lambda function: it installs the dependencies inside the official Lambda runtime image (`public.ecr.aws/lambda/python:3.12`), so compiled packages match Lambda's Linux x86_64 environment, then zips them together with the app code.
 
-1. **CloudFront**: Global CDN, provides HTTPS, caches static content
-2. **S3 Frontend Bucket**: Hosts static Next.js files
-3. **API Gateway**: Manages API routes, handles CORS
-4. **Lambda**: Runs your Python backend serverlessly
-5. **S3 Memory Bucket**: Stores conversation history as JSON files
+## Prerequisites
 
-How to Minimize Costs
+- AWS CLI.
+- Terraform `>= 1.10`.
+- Docker.
+- [uv](https://docs.astral.sh/uv/).
+- NodeJS 20+.
+- An IAM user named `aiengineer` with an access key. This user **is not managed by Terraform**. It is the identity that runs Terraform, so its permissions have to exist first.
+- Bedrock model access in `bedrock_model_id` (default `amazon.nova-micro-v1:0`).
 
-1. **Use CloudFront caching** - reduces requests to origin
-2. **Set appropriate Lambda timeout** - don't set unnecessarily high
-3. **Monitor with CloudWatch** - set up billing alerts
-4. **Clean old S3 files** - delete old conversation logs periodically
-5. **Use AWS Free option For CloudFront**
+## 1. One-time IAM Setup for `aiengineer`
 
-## 1. In AWS Console, search for **IAM**
+This is the only step I do outside Terraform as the root user, an admin, or in this case `aiengineer` IAM user. The table below is the **complete** set of policies that `aiengineer` needs for everything in this repo:
 
-1. Click **User groups** → **Create group**
-2. Group name: `TwinAccess`
-3. Attach the following policies - IMPORTANT see the last one added in to avoid permission issues later!
-   - `AWSLambda_FullAccess` - For Lambda operations
-   - `AmazonS3FullAccess` - For S3 bucket operations
-   - `AmazonAPIGatewayAdministrator` - For API Gateway
-   - `CloudFrontFullAccess` - For CloudFront distribution
-   - `IAMFullAccess` - To view roles
-   - `AmazonDynamoDBFullAccess_v2` - Needed on Day 4
-4. Click **Create group**
+- Applying and destroying `terraform-bootstrap/`.
+- Applying and destroying `terraform/` for every environment, including a custom domain.
+- Running the backend locally against Bedrock and AWS S3.
+- Managing its own access keys.
 
-## 2: Add User to Group
+That's 8 policies, which is under the default quota of 10 managed policies per IAM user ([more info on how to increase it](https://repost.aws/knowledge-center/iam-increase-policy-size)).
 
-1. In IAM, click **Users** → Select `aiengineer` (from Week 1)
-2. Click **Add to groups**
-3. Select `TwinAccess`
-4. Click **Add to groups**
+| #   | Policy                          | Type             | Needed for                                                                                |
+| --- | ------------------------------- | ---------------- | ----------------------------------------------------------------------------------------- |
+| 1   | `AmazonS3FullAccess`            | AWS managed      | State bucket, frontend/memory buckets, `aws s3 sync` / `aws s3 rm` in the scripts         |
+| 2   | `AWSLambda_FullAccess`          | AWS managed      | The Lambda function and its API Gateway invoke permission                                 |
+| 3   | `AmazonAPIGatewayAdministrator` | AWS managed      | HTTP API, routes, stage, integration                                                      |
+| 4   | `CloudFrontFullAccess`          | AWS managed      | Distribution and cache invalidations                                                      |
+| 5   | `CloudWatchFullAccessV2`        | AWS managed      | The Lambda log group (create, retention, tags, delete) and reading logs/metrics           |
+| 6   | `AmazonBedrockFullAccess`       | AWS managed      | Enbales you to call Bedrock when you wanna test it locally                                |
+| 7   | `IAMUserChangePassword`         | AWS managed      | Changing the user's own console password                                                  |
+| 8   | `TwinTerraformOperator`         | Customer managed | All the IAM parts plus ACM/Route 53, each scoped to the exact resources this repo creates |
 
-## 3: Sign In as IAM User
-
-1. Sign out from root account
-2. Sign in as `aiengineer` with your IAM credentials
-
-## 4: Build the Lambda Package
-
-Make sure Docker Desktop is running, then:
+> [!CAUTION]
+> `aiengineer` must **not** have `IAMFullAccess`, directly or through a group. `IAMFullAccess` grants `iam:*` on every resource, so it is admin-equivalent: the user can run `aws iam attach-user-policy --user-name aiengineer --policy-arn arn:aws:iam::aws:policy/AdministratorAccess` on itself. Every scoped statement below would then be pointless.
 
 ```bash
-cd backend
-uv run deploy.py
+aws iam list-user-policies --user-name aiengineer           # should print no inline policies
+aws iam list-groups-for-user --user-name aiengineer         # should print no groups
+aws iam list-attached-user-policies --user-name aiengineer  # should print exactly the 8 policies in the table
 ```
 
-This creates `lambda-deployment.zip` containing your Lambda function and all dependencies.
-
-## 5: Create Lambda Function
-
-### Create a new execution role in root account
-
-1. Go to IAM → Roles → Create role.
-2. Under **Trusted entity type**, choose **AWS service**, then **Lambda** as the **use case**. The console generates the trust policy with `lambda.amazonaws.com` and `sts:AssumeRole` for you.
-3. On the permissions step, search for and attach `AWSLambdaBasicExecutionRole`. This is an existing AWS managed policy, so there's nothing to create.
-4. Click **Add permissions** → **Attach policies**
-5. Search and select: `AmazonS3FullAccess`
-6. Click **Attach policies**
-7. Name the role, e.g. `digital-twin-role`, and create it.
-
-### Create Lambda Function itself
-
-1. In AWS Console, search for **Lambda**
-2. Click **Create function**
-3. Choose **Author from scratch**
-4. Configuration:
-   - Function name: `twin-api`
-   - Runtime: **Python 3.12**
-   - Architecture: **x86_64**
-5. Click **Create function**
-
-### 6: Upload Your Code
-
-1. In the Lambda function page, under **Code source**
-2. Click **Upload from** → **.zip file**
-3. Click **Upload** and select your `backend/lambda-deployment.zip`
-4. Click **Save**
-
-## 7: Configure Handler
-
-1. In **Runtime settings**, click **Edit**
-2. Change Handler to: `lambda_handler.handler`
-3. Click **Save**
-
-## 8: Configure Environment Variables
-
-1. Click **Configuration** tab → **Environment variables**
-2. Click **Edit** → **Add environment variable**
-3. Add these variables:
-   - `OPENAI_API_KEY` = your_openai_api_key
-   - `CORS_ORIGINS` = `*` (we'll restrict this later)
-   - `USE_S3` = `true`
-   - `S3_BUCKET` = `twin-memory` (we'll create this next)
-4. Click **Save**
-
-## 9: Increase Timeout
-
-1. In **Configuration** → **General configuration**
-2. Click **Edit**
-3. Set Timeout to **30 seconds**
-4. Click **Save**
-
-## 10: Test the Lambda Function
-
-1. Click **Test** tab
-2. Create new test event:
-   - Event name: `HealthCheck`
-   - Event template: **API Gateway AWS Proxy** (scroll down to find it)
-   - Modify the Event JSON to:
-   ```json
-   {
-     "version": "2.0",
-     "routeKey": "GET /health",
-     "rawPath": "/health",
-     "headers": {
-       "accept": "application/json",
-       "content-type": "application/json",
-       "user-agent": "test-invoke"
-     },
-     "requestContext": {
-       "http": {
-         "method": "GET",
-         "path": "/health",
-         "protocol": "HTTP/1.1",
-         "sourceIp": "127.0.0.1",
-         "userAgent": "test-invoke"
-       },
-       "routeKey": "GET /health",
-       "stage": "$default"
-     },
-     "isBase64Encoded": false
-   }
-   ```
-3. Click **Save** → **Test**
-4. You should see a successful response with a body containing `{"status": "healthy", "use_s3": true}`
-
-**Note**: The `sourceIp` and `userAgent` fields in `requestContext.http` are required by Mangum to properly handle the request.
-
-## 11: Create S3 Buckets
-
-1. In AWS Console, search for **S3**
-2. Click **Create bucket**
-3. Configuration:
-   - Bucket name: `twin-memory-kasir-barati` (must be globally unique)
-   - Region: Same as your Lambda (e.g., us-east-1)
-   - Leave all other settings as default
-4. Click **Create bucket**
-5. Copy the exact bucket name
-
-## 12: Update Lambda Environment
-
-1. Go back to Lambda → **Configuration** → **Environment variables**
-2. Update `S3_BUCKET` with your actual bucket name
-3. Click **Save**
-
-## 13: Create Frontend Bucket
-
-1. Back in S3, click **Create bucket**
-2. Configuration:
-   - Bucket name: `twin-frontend-kasir-barati`
-   - Region: Same as Lambda
-   - **Uncheck** "Block all public access"
-   - Check the acknowledgment box
-3. Click **Create bucket**
-
-## 14: Enable Static Website Hosting
-
-1. Click on your frontend bucket
-2. Go to **Properties** tab
-3. Scroll to **Static website hosting** → **Edit**
-4. Enable static website hosting:
-   - Hosting type: **Host a static website**
-   - Index document: `index.html`
-   - Error document: `404.html`
-5. Click **Save changes**
-6. Note the **Bucket website endpoint** URL
-
-## 15: Configure Bucket Policy
-
-1. Go to **Permissions** tab
-2. Under **Bucket policy**, click **Edit**
-3. Add this policy (replace `YOUR-BUCKET-NAME`):
-
-   ```json
-   {
-     "Version": "2012-10-17",
-     "Statement": [
-       {
-         "Sid": "PublicReadGetObject",
-         "Effect": "Allow",
-         "Principal": "*",
-         "Action": "s3:GetObject",
-         "Resource": "arn:aws:s3:::YOUR-BUCKET-NAME/*"
-       }
-     ]
-   }
-   ```
-
-4. Click **Save changes**
-
-## 16: Set Up API Gateway
-
-### Step 1: Create HTTP API with Integration
-
-1. In AWS Console, search for **API Gateway**
-2. Click **Create API**
-3. Choose **HTTP API** → **Build**
-4. **Step 1 - Create and configure integrations:**
-   - Click **Add integration**
-   - Integration type: **Lambda**
-   - Lambda function: Select `twin-api` from the dropdown
-   - API name: `twin-api-gateway`
-   - Click **Next**
-
-### Step 2: Configure Routes
-
-1. **Step 2 - Configure routes:**
-2. You'll see a default route already created. Click **Add route** to add more:
-
-   **Existing route (update it):**
-
-   - Method: `ANY`
-   - Resource path: `/{proxy+}`
-   - Integration target: `twin-api` (should already be selected)
-
-   **Add these additional routes (click Add route for each):**
-
-   Route 1:
-
-   - Method: `GET`
-   - Resource path: `/`
-   - Integration target: `twin-api`
-
-   Route 2:
-
-   - Method: `GET`
-   - Resource path: `/health`
-   - Integration target: `twin-api`
-
-   Route 3:
-
-   - Method: `POST`
-   - Resource path: `/chat`
-   - Integration target: `twin-api`
-
-   Route 4 (for CORS):
-
-   - Method: `OPTIONS`
-   - Resource path: `/{proxy+}`
-   - Integration target: `twin-api`
-
-3. Click **Next**
-
-### Step 3: Configure Stages
-
-1. **Step 3 - Configure stages:**
-   - Stage name: `$default` (leave as is)
-   - Auto-deploy: Leave enabled
-2. Click **Next**
-
-### Step 4: Review and Create
-
-1. **Step 4 - Review and create:**
-   - Review your configuration
-   - You should see your Lambda integration and all routes listed
-2. Click **Create**
-
-### Step 5: Configure CORS
-
-After creation, configure CORS:
-
-1. In your newly created API, go to **CORS** in the left menu
-2. Click **Configure**
-3. Settings:
-   - Access-Control-Allow-Origin: Type `*` and **click Add** (important: you must click Add!)
-   - Access-Control-Allow-Headers: Type `*` and **click Add** (don't just type - click Add!)
-   - Access-Control-Allow-Methods: Type `*` and **click Add** (or add `GET, POST, OPTIONS` individually)
-   - Access-Control-Max-Age: `300`
-4. Click **Save**
-
-**Important**:
-
-- For each field with multiple values (Origin, Headers, Methods), you must type the value and then click the **Add** button. The value won't be saved if you just type it without clicking Add!
-- You do not need to "Deploy" your API after configuring CORS since it is an HTTP API and they are auto deployed.
-
-### Step 6: Test Your API
-
-1. Go to **API details** (or **Stages** → **$default**)
-2. Copy your **Invoke URL** (looks like: `https://abc123xyz.execute-api.us-east-1.amazonaws.com`)
-3. Test with a browser by visiting: https://YOUR-API-ID.execute-api.us-east-1.amazonaws.com/health
-
-You should see: `{"status": "healthy", "use_s3": true}`
-
-**Note**: If you get a "Missing Authentication Token" error, make sure you're using the exact path `/health` and not just the base URL.
-
-## 17: Deploy Frontend
-
-1. We have `NEXT_PUBLIC_API_URL` which dictates the API URL. Create `frontend/.env.local` with `NEXT_PUBLIC_API_URL=https://asd123.execute-api.eu-central-1.amazonaws.com` Or leave it blank and use the default local URL.
-2. Build static export:
-   ```bash
-   cd frontend
-   npm run build
-   ```
-3. Upload to S3:
-
-   ```bash
-   cd frontend
-   aws s3 sync out/ s3://twin-frontend-kasir-barati/ --delete
-   ```
-
-   Just make sure you have executed `aws configure` with your AWS credentials first.
-
-   The `--delete` flag ensures that old files are removed from S3 if they're no longer in your build.
-
-4. Go to your S3 bucket → **Properties** → **Static website hosting**
-5. Click the **Bucket website endpoint** URL
-6. Your twin should load! But CORS might block API calls...
-
-## 18: Set Up CloudFront
-
-### Step 1: Get Your S3 Website Endpoint
-
-First, you need your S3 static website URL (not the bucket name):
-
-1. Go to S3 → Your frontend bucket
-2. Click **Properties** tab
-3. Scroll to **Static website hosting**
-4. Copy the **Bucket website endpoint** (looks like: `http://twin-frontend-xxx.s3-website-us-east-1.amazonaws.com`)
-5. Save this URL - you'll need it for CloudFront
-
-### Step 2: Create CloudFront Distribution
-
-1. In AWS Console, search for **CloudFront**
-2. Click **Create distribution**
-3. You will be prompted to 'Choose a plan'. Scroll to the bottom and choose **Pay as you go**.
-
-   IMPORTANT: DO NOT choose the 'free' plan. You won't be able to delete the distribution created until you cancel the subscription and wait for the end of billing cycle. It's a trap!!
-
-4. **Step 1 - Origin:**
-   - Distribution name: `twin-distribution`
-   - Click **Next**
-5. **Step 2 - Add origin:**
-   - Choose origin: Select **Other** (not Amazon S3!)
-   - Origin domain name: Paste your S3 website endpoint WITHOUT the http://
-     - Example: `twin-frontend-xxx.s3-website-us-east-1.amazonaws.com`
-   - **Origin protocol policy**: Select **HTTP only** (CRITICAL - not HTTPS!)
-     - This is because S3 static website hosting doesn't support HTTPS
-     - If you select HTTPS, you'll get 504 Gateway Timeout errors
-   - Origin name: `s3-static-website` (or leave auto-generated)
-   - Leave other settings as default
-   - Click **Add origin**
-6. **Step 3 - Default cache behavior:**
-   - Path pattern: Leave as `Default (*)`
-   - Origin and origin groups: Select your origin
-   - Viewer protocol policy: **Redirect HTTP to HTTPS**
-   - Allowed HTTP methods: **GET, HEAD**
-   - Cache policy: **CachingOptimized**
-   - Click **Next**
-7. **Step 4 - Web Application Firewall (WAF):**
-   - Select **Do not enable security protections** (saves $14/month)
-   - Click **Next**
-8. **Step 5 - Settings:**
-   - Price class: **Use only North America and Europe** (to save costs)
-   - Default root object: `index.html`
-   - Click **Next**
-9. **Review** and click **Create distribution**
-
-## 19: Wait for Deployment
-
-CloudFront takes 5-15 minutes to deploy globally. Status will change from "Deploying" to "Enabled".
-
-## 20: Update CORS Settings
-
-While waiting for CloudFront to deploy, update your Lambda to accept requests from CloudFront:
-
-1. Go to Lambda → **Configuration** → **Environment variables**
-2. Find your CloudFront distribution domain:
-   - Go to CloudFront → Your distribution
-   - Copy the **Distribution domain name** (like `d1234abcd.cloudfront.net`)
-3. Edit the `CORS_ORIGINS` environment variable:
-   - Current value: `*`
-   - New value: `https://YOUR-CLOUDFRONT-DOMAIN.cloudfront.net`
-   - It matches the CloudFront URL, it includes `https://` at the start, and there's **no** `/` at the end, and it looks just like the example
-   - Example: `https://d1234abcd.cloudfront.net`
-4. Click **Save**
-
-## 21: Invalidate CloudFront Cache
-
-1. In CloudFront, select your distribution
-2. Go to **Invalidations** tab
-3. Click **Create invalidation**
-4. Add path: `/*`
-5. Click **Create invalidation**
-
----
-
-## Cleanup
-
-- Empty the AWS S3 buckets, then delete them.
-- Delete the Lambda function.
-- Disable the CloudFront distribution and then cancel the free flat-rate pricing plan, and now you should be able to delete it. Of course you will have to wait after disabling the CloudFront distribution before you can cancel the subscription plan and delete it.
-
----
-
-## Bedrock
-
-1. You need to change the `backend/server.py` file to switch to Bedrock instead of OpenAI.
-2. You need to give the execution role you have for your Lambda function to have access to Bedrock.
-   - The way we do this without any API key is because we are already inside the AWS ecosystem.
-3. You can see you called Amazon's Bedrock in the CloudWatch logs.
-
----
-
-## Terraform
-
-Create `LambdaExecutionRoleProvisioner` and assign it to the user who will be running the terraform:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "LambdaRoleLifecycle",
-      "Effect": "Allow",
-      "Action": [
-        "iam:CreateRole",
-        "iam:DeleteRole",
-        "iam:GetRole",
-        "iam:TagRole",
-        "iam:UntagRole",
-        "iam:ListRolePolicies",
-        "iam:ListAttachedRolePolicies",
-        "iam:ListInstanceProfilesForRole",
-        "iam:PutRolePolicy",
-        "iam:DeleteRolePolicy"
-      ],
-      "Resource": "arn:aws:iam::637423441352:role/*-lambda-role"
-    },
-    {
-      "Sid": "LambdaRolePassToLambdaOnly",
-      "Effect": "Allow",
-      "Action": "iam:PassRole",
-      "Resource": "arn:aws:iam::637423441352:role/*-lambda-role",
-      "Condition": {
-        "StringEquals": {
-          "iam:PassedToService": "lambda.amazonaws.com"
-        }
-      }
-    },
-    {
-      "Sid": "LambdaRoleAttachKnownPoliciesOnly",
-      "Effect": "Allow",
-      "Action": ["iam:AttachRolePolicy", "iam:DetachRolePolicy"],
-      "Resource": "arn:aws:iam::637423441352:role/*-lambda-role",
-      "Condition": {
-        "ArnEquals": {
-          "iam:PolicyARN": [
-            "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
-            "arn:aws:iam::aws:policy/AmazonBedrockFullAccess",
-            "arn:aws:iam::aws:policy/AmazonS3FullAccess"
-          ]
-        }
-      }
-    }
-  ]
-}
-```
-
-Create `AIEngineerUserManagement` amd assign it to the user too:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "ManageOwnUserTagsAndCredentials",
-      "Effect": "Allow",
-      "Action": [
-        "iam:TagUser",
-        "iam:ListUserTags",
-        "iam:UntagUser",
-        "iam:ListMFADevices",
-        "iam:ListSigningCertificates",
-        "iam:GetLoginProfile"
-      ],
-      "Resource": "arn:aws:iam::637423441352:user/aiengineer"
-    }
-  ]
-}
-```
-
-And `AIEngineerAccessKeySelfService` with:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "ManageOwnAccessKeys",
-      "Effect": "Allow",
-      "Action": [
-        "iam:CreateAccessKey",
-        "iam:UpdateAccessKey",
-        "iam:DeleteAccessKey",
-        "iam:ListAccessKeys",
-        "iam:GetAccessKeyLastUsed"
-      ],
-      "Resource": "arn:aws:iam::637423441352:user/aiengineer"
-    }
-  ]
-}
-```
-
-On top of that I had granted the user these permissions:
-
-- `AmazonBedrockFullAccess`.
-- `AmazonAPIGatewayAdministrator`.
-- `CloudFrontFullAccess`.
-- `AmazonS3FullAccess`.
-- `AmazonEC2ContainerRegistryFullAccess`.
-- `AWSAppRunnerFullAccess`.
-- `AWSLambda_FullAccess`.
-- `CloudWatchFullAccess`.
-- `CloudWatchFullAccessV2`.
-- `CloudWatchLogsFullAccess`.
-- `IAMUserChangePassword`.
-
-`AmazonBedrockFullAccess` and `AmazonS3FullAccess` are both AWS managed "FullAccess" policies — much broader than a Lambda function typically needs. They must be limited to what Lambda function needs.
-
-Potential improvements:
-
-1. Store Terraform state file in a AWS S3.
-2. `aws_iam_role_policy_attachment.lambda_s3` uses `AmazonS3FullAccess` (access to every bucket in the account) and `lambda_bedrock` similarly uses `AmazonBedrockFullAccess`. Both are broader than the Lambda needs — it only touches `aws_s3_bucket.memory` and one Bedrock model (`var.bedrock_model_id`).
-3. CloudFront → S3 origin uses `origin_protocol_policy = "http-only"`, so traffic between CloudFront and the S3 website endpoint is unencrypted. Also related: the frontend bucket is fully public (`block_public_*` all false) rather than using Origin Access Control.
-
-### Terraform State in AWS S3
-
-For this we have the `terraform-bootstrap` directory, which provisions everything that must exist *before* GitHub Actions can run Terraform at all: the S3 state bucket, the GitHub OIDC provider, and the IAM role GitHub Actions assumes. This is a chicken-and-egg problem — CI can't create the resources it needs to run — so this directory is applied only by a human, locally, never by CI. See `terraform-bootstrap/README.md` for details.
-
-First go to your AWS Console and create an access key for the IAM user you have access to, and it must be allowed to create AWS S3 bucket. E.g. here I have already an IAM user with necessary permissions to create such resource. In fact I am using the same IAM user which terraform will use to provision the digital twin.
+[`twin-terraform-operator.template.json`](./scripts/twin-terraform-operator.template.json) is all the policies needed for this app. Copy it to `twin-terraform-operator.json` and replace `<AWS_ACCOUNT_ID>` with the AWS account ID.
 
 ```bash
-aws configure --profile twin-dev
+cp ./scripts/twin-terraform-operator.template.json ./scripts/twin-terraform-operator.json
+./setup-twin-terraform-operator-policies.sh <AWS_ACCOUNT_ID>
+```
+
+The last step should be executed as root/admin, It's the same as doing it manually through the AWS Console: IAM → Policies → Create policy → JSON, then IAM → Users → `aiengineer` → Add permissions → Attach policies directly.
+
+### Why the Custom Policy Looks the Way it does
+
+The goal is to avoid reopening the `CreateRole` + `AttachRolePolicy` + `PassRole` privilege-escalation path. See [this flashcard](https://kasir-barati.github.io/aws-flashcards/privilege-escalation-vulnerability.html):
+
+- **No arbitrary roles.** `iam:CreateRole`, `iam:AttachRolePolicy` and `iam:PutRolePolicy` are pinned to two role ARNs: `role/*-lambda-role` and `role/github-actions-twin-deploy`. `aiengineer` can't create or modify any other role in the account, so it can't mint a fresh admin-trusted role.
+- **Lambda roles are capped by the boundary.** On `*-lambda-role`:
+  - `iam:CreateRole` and `iam:PutRolePolicy` only work when the role carries the `ci-managed-role-boundary` permissions boundary. `terraform/main.tf` always sets it. The boundary denies `iam:*`, `sts:*`, `organizations:*` and `account:*`, so even an admin-like inline policy grants nothing beyond it.
+  - `iam:AttachRolePolicy` only accepts the two managed policies `terraform/main.tf` attaches: `AmazonBedrockFullAccess` and `AmazonS3FullAccess`. `AWSLambdaBasicExecutionRole` isn't on the list, because `main.tf` replaced it with the scoped `lambda_logs` inline policy.
+  - There is no `iam:UpdateAssumeRolePolicy` and no `iam:PutRolePermissionsBoundary`. `CreateRole` already sets the trust policy and the boundary, so `aiengineer` can't retarget the role's trust or swap its boundary later.
+- **`iam:PassRole` is limited.** The scoped statement only allows passing `*-lambda-role`, and only to `lambda.amazonaws.com`. The bootstrap resources don't need `PassRole` at all.
+- **No arbitrary policies.** `iam:CreatePolicy` and `iam:CreatePolicyVersion` are pinned to `policy/ci-managed-role-boundary`. `aiengineer` can't create or rewrite any other managed policy.
+- **Bootstrap resources are pinned to exact ARNs:** the GitHub OIDC provider, the `github-actions-twin-deploy` role and the `ci-managed-role-boundary` policy.
+- **Self-service is pinned to the caller.** The access-key and user-tag actions only apply to `user/${aws:username}`, so `aiengineer` can't mint keys for another user.
+- **Unscoped statements:** the only statements with `Resource: "*"` use actions that AWS doesn't let you scope, or that only read data:
+  - `sts:GetCallerIdentity`.
+  - `iam:ListOpenIDConnectProviders`.
+  - the ACM/Route 53 statements. `aws_route53_zone` has to look up the zone by name, and the certificate ARN is only known after it's created.
+
+## 2. Configure the AWS CLI Profile
+
+```bash
+aws configure --profile twin-dev # access key of aiengineer, region eu-central-1
+export AWS_PROFILE=twin-dev      # the app stack and scripts use the default credential chain
+```
+
+## 3. Apply the Bootstrap Stack -- Once
+
+```bash
 cd terraform-bootstrap
+cp terraform.tfvars.example terraform.tfvars
+# Edit terraform-bootstrap/terraform.tfvars
 terraform init
 terraform apply
 ```
+
+## 4. Deploy the app
+
+Create these environment variables in your GitHub repository (in the settings as secrets):
+
+- `AWS_ROLE_ARN`: the `github_actions_role_arn` output.
+- `AWS_ACCOUNT_ID`.
+- `DEFAULT_AWS_REGION`.
+
+And you need to add these env variables:
+
+| Variable              | Default                 | Notes                                                                         |
+| --------------------- | ----------------------- | ----------------------------------------------------------------------------- |
+| `USE_S3`              | `false`                 | If `USE_S3` isn't `true`, memory is written to the local `memory/` directory. |
+| `S3_BUCKET`           | `""`                    | The bucket used for storing the memory                                        |
+| `CORS_ORIGINS`        | `http://localhost:3000` | The URLs that are allowed to access the API                                   |
+| `AWS_PROFILE`         | `digital-twin`          | The AWS profile used for authentication                                       |
+| `NEXT_PUBLIC_API_URL` | `http://localhost:8000` | The URL of the deployed backend API                                           |
+
+And then when you push your changes to GitHub on `main` branch it will work. We do **not** use `terraform/variables.tf` instead they are passed through command line instead.
+
+| Variable                   | Default                  | Notes                                                                  |
+| -------------------------- | ------------------------ | ---------------------------------------------------------------------- |
+| `aws_region`               | `eu-central-1`           | AWS region                                                             |
+| `environment`              | passed by `deploy.sh`    | `dev`, `test` or `prod`                                                |
+| `project_name`             | passed by `deploy.sh`    | Lowercase letters, digits and hyphens                                  |
+| `bedrock_model_id`         | `amazon.nova-micro-v1:0` | The model needs to be enabled in Bedrock                               |
+| `lambda_timeout`           | `60`                     | Seconds                                                                |
+| `api_throttle_rate_limit`  | `5`                      |                                                                        |
+| `api_throttle_burst_limit` | `10`                     |                                                                        |
+| `log_retention_days`       | `14`                     | Lambda log group retention                                             |
+| `use_custom_domain`        | `false`                  | Should we use a custom domain                                          |
+| `root_domain`              | `""`                     | For example `example.com`. The Route 53 hosted zone must already exist |
+
+### CI/CD (GitHub Actions)
+
+- **Deploy** runs on every push to `main` (dev), or manually with an environment you pick. It assumes `github-actions-twin-deploy` through OIDC and runs `scripts/deploy.sh`. Then it invalidates CloudFront.
+- **Destroy** runs only manually. You have to type the environment name to confirm, and then it runs `scripts/destroy.sh`.
+
+The CI role doesn't use `aiengineer`'s permissions. `terraform-bootstrap/main.tf` gives it its own set:
+
+- AWS managed policies for Lambda, S3, API Gateway, CloudFront, Bedrock, DynamoDB, ACM, Route 53 and IAM read-only.
+- An inline policy that lets it create and manage **only** roles that are tagged `IamManagedByRole = github-actions-twin-deploy` **and** carry the `ci-managed-role-boundary` boundary.
+- Permission to manage the `/aws/lambda/*` log groups.
+
+This is why [`aws_iam_role.lambda_role` in `terraform/main.tf`](https://github.com/kasir-barati/digital-twin/blob/7b6719861285d9f919f6309e51c6e770cffb7181/terraform/main.tf#L82-L105) sets both that tag and the boundary.
+
+## Known Improvements
+
+1. The Lambda role attaches `AmazonS3FullAccess` and `AmazonBedrockFullAccess`. It only needs the memory bucket and the one model in `bedrock_model_id`, so replace both with a scoped inline policy. Then remove them from the `LambdaRoleAttachKnownPoliciesOnly` allow-list.
+2. CloudFront talks to the S3 website endpoint over plain HTTP (`origin_protocol_policy = "http-only"`), and the frontend bucket is fully public. Switching to a private bucket with Origin Access Control would fix both problems.
+3. API Gateway CORS still allows `*` origins. The Lambda enforces `CORS_ORIGINS` itself, but the gateway could be restricted too.
+
+## The OIDC Thumbprint
+
+`aws_iam_openid_connect_provider.github` sets a `thumbprint_list`. The thumbprint is a SHA-1 fingerprint of a certificate in GitHub's OIDC TLS chain. AWS originally used it to pin trust when fetching GitHub's signing keys. The IAM API still requires a value. Since mid-2023, though, AWS checks GitHub (and other well-known providers) against its own trusted certificate authorities instead of this thumbprint. So the value is a formality, not an active security control. See the [GitHub changelog](https://github.blog/changelog/2023-06-27-github-actions-update-on-oidc-integration-with-aws).
